@@ -222,7 +222,7 @@ pub fn generate_comparison_table(traces: &[(String, BTreeMap<KernelId, Vec<f64>>
             .unwrap_or(0);
 
         let mut row = format!(
-            "| [{}] {} | {} | {} |",
+            "| `[{}] {}` | `{}` | `{}` |",
             max_count,
             escape_md(&kid.name),
             escape_md(&kid.grid),
