@@ -131,7 +131,40 @@ pub fn parse_trace(path: &Path) -> Result<BTreeMap<KernelId, Vec<f64>>> {
     Ok(kernels)
 }
 
+/// Compute p50 (median) of a sorted slice.
+fn percentile50(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+}
+
+/// Stats for a kernel in a single trace.
+struct KernelStats {
+    p50: f64,
+    max: f64,
+    total: f64,
+}
+
+fn compute_stats(durations: &[f64]) -> KernelStats {
+    let mut sorted = durations.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    KernelStats {
+        p50: percentile50(&sorted),
+        max: sorted.last().copied().unwrap_or(0.0),
+        total: sorted.iter().sum(),
+    }
+}
+
 /// Generate a markdown comparison table across multiple traces.
+///
+/// Each trace gets three sub-columns: p50, max, total (all in ms).
+/// Rows show `[num_instances] kernel_name` and are sorted by max execution time descending.
 pub fn generate_comparison_table(traces: &[(String, BTreeMap<KernelId, Vec<f64>>)]) -> String {
     let all_kernel_ids: BTreeSet<&KernelId> = traces
         .iter()
@@ -142,37 +175,68 @@ pub fn generate_comparison_table(traces: &[(String, BTreeMap<KernelId, Vec<f64>>
         return "No GPU kernel events found in any trace.\n".to_string();
     }
 
+    // Pre-compute stats for sorting.
+    // Sort key: maximum "max" value across all traces for each kernel_id, descending.
+    let mut kernel_list: Vec<&KernelId> = all_kernel_ids.into_iter().collect();
+    kernel_list.sort_by(|a, b| {
+        let max_a = traces
+            .iter()
+            .filter_map(|(_, k)| k.get(*a).map(|d| compute_stats(d).max))
+            .fold(0.0_f64, f64::max);
+        let max_b = traces
+            .iter()
+            .filter_map(|(_, k)| k.get(*b).map(|d| compute_stats(d).max))
+            .fold(0.0_f64, f64::max);
+        max_b
+            .partial_cmp(&max_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     let trace_names: Vec<&str> = traces.iter().map(|(name, _)| name.as_str()).collect();
     let mut lines = Vec::new();
 
     // Header
     let mut header = "| Kernel | Grid | Input Shapes |".to_string();
     for name in &trace_names {
-        header.push_str(&format!(" {} (ms) |", name));
+        header.push_str(&format!(
+            " {} p50 (ms) | {} max (ms) | {} total (ms) |",
+            name, name, name
+        ));
     }
     lines.push(header);
 
     // Separator
     let mut sep = "| --- | --- | --- |".to_string();
     for _ in &trace_names {
-        sep.push_str(" ---: |");
+        sep.push_str(" ---: | ---: | ---: |");
     }
     lines.push(sep);
 
     // Data rows
-    for kid in &all_kernel_ids {
+    for kid in &kernel_list {
+        // Determine instance count (max across traces for this kernel_id).
+        let max_count = traces
+            .iter()
+            .filter_map(|(_, k)| k.get(*kid).map(|d| d.len()))
+            .max()
+            .unwrap_or(0);
+
         let mut row = format!(
-            "| {} | {} | {} |",
+            "| [{}] {} | {} | {} |",
+            max_count,
             escape_md(&kid.name),
             escape_md(&kid.grid),
             escape_md(&kid.input_shapes)
         );
         for (_, kernels) in traces {
             if let Some(durations) = kernels.get(*kid) {
-                let total: f64 = durations.iter().sum();
-                row.push_str(&format!(" {:.3} |", total));
+                let stats = compute_stats(durations);
+                row.push_str(&format!(
+                    " {:.3} | {:.3} | {:.3} |",
+                    stats.p50, stats.max, stats.total
+                ));
             } else {
-                row.push_str(" |");
+                row.push_str(" | | |");
             }
         }
         lines.push(row);
@@ -351,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_comparison_table() {
+    fn test_generate_table_p50_max_total() {
         let kid = KernelId {
             name: "my_kernel".to_string(),
             grid: "[384, 1, 1]".to_string(),
@@ -359,26 +423,51 @@ mod tests {
         };
 
         let mut trace1 = BTreeMap::new();
-        trace1.insert(kid.clone(), vec![0.5]);
+        trace1.insert(kid.clone(), vec![1.0, 2.0, 3.0]);
 
-        let mut trace2 = BTreeMap::new();
-        trace2.insert(kid.clone(), vec![0.7]);
-
-        let traces = vec![
-            ("trace1".to_string(), trace1),
-            ("trace2".to_string(), trace2),
-        ];
-
+        let traces = vec![("t1".to_string(), trace1)];
         let table = generate_comparison_table(&traces);
-        assert!(table.contains("my_kernel"));
-        assert!(table.contains("trace1 (ms)"));
-        assert!(table.contains("trace2 (ms)"));
-        assert!(table.contains("0.500"));
-        assert!(table.contains("0.700"));
+
+        // Header should have p50, max, total sub-columns
+        assert!(table.contains("t1 p50 (ms)"));
+        assert!(table.contains("t1 max (ms)"));
+        assert!(table.contains("t1 total (ms)"));
+        // [3] instances
+        assert!(table.contains("[3] my_kernel"));
+        // p50=2.0, max=3.0, total=6.0
+        assert!(table.contains("2.000"));
+        assert!(table.contains("3.000"));
+        assert!(table.contains("6.000"));
     }
 
     #[test]
-    fn test_generate_comparison_table_missing_kernel() {
+    fn test_generate_table_sorted_by_max_descending() {
+        let kid_fast = KernelId {
+            name: "fast_kernel".to_string(),
+            grid: "[1, 1, 1]".to_string(),
+            input_shapes: String::new(),
+        };
+        let kid_slow = KernelId {
+            name: "slow_kernel".to_string(),
+            grid: "[1, 1, 1]".to_string(),
+            input_shapes: String::new(),
+        };
+
+        let mut t1 = BTreeMap::new();
+        t1.insert(kid_fast, vec![0.1]);
+        t1.insert(kid_slow, vec![10.0]);
+
+        let traces = vec![("t1".to_string(), t1)];
+        let table = generate_comparison_table(&traces);
+
+        // slow_kernel (max=10.0) should appear before fast_kernel (max=0.1)
+        let slow_pos = table.find("slow_kernel").unwrap();
+        let fast_pos = table.find("fast_kernel").unwrap();
+        assert!(slow_pos < fast_pos);
+    }
+
+    #[test]
+    fn test_generate_table_missing_kernel() {
         let kid1 = KernelId {
             name: "kernel_a".to_string(),
             grid: "[1, 1, 1]".to_string(),
@@ -401,23 +490,14 @@ mod tests {
 
         assert!(table.contains("kernel_a"));
         assert!(table.contains("kernel_b"));
-        assert!(table.contains("1.000"));
-        assert!(table.contains("2.000"));
+        // Missing kernel should have empty p50/max/total cells
+        assert!(table.contains("| | | |"));
     }
 
     #[test]
-    fn test_duplicate_kernel_ids_summed() {
-        let kid = KernelId {
-            name: "repeated".to_string(),
-            grid: "[1, 1, 1]".to_string(),
-            input_shapes: String::new(),
-        };
-
-        let mut t1 = BTreeMap::new();
-        t1.insert(kid, vec![1.0, 2.0, 3.0]);
-
-        let traces = vec![("t1".to_string(), t1)];
-        let table = generate_comparison_table(&traces);
-        assert!(table.contains("6.000"));
+    fn test_percentile50() {
+        assert!((percentile50(&[1.0, 2.0, 3.0]) - 2.0).abs() < 0.001);
+        assert!((percentile50(&[1.0, 2.0, 3.0, 4.0]) - 2.5).abs() < 0.001);
+        assert!((percentile50(&[5.0]) - 5.0).abs() < 0.001);
     }
 }
