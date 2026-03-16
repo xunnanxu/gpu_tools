@@ -1,6 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::{Path, PathBuf};
 
 /// GPU trace analysis CLI for PyTorch profiler traces.
 #[derive(Parser, Debug)]
@@ -8,6 +8,16 @@ use std::path::PathBuf;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ConvertFrom {
+    Nsys,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ConvertTo {
+    Json,
 }
 
 #[derive(Subcommand, Debug)]
@@ -33,6 +43,24 @@ enum Command {
         #[arg(short = 'o', long = "output", required = true)]
         output: PathBuf,
     },
+
+    /// Convert trace files between formats.
+    Convert {
+        /// Input format.
+        #[arg(long, default_value = "nsys", value_enum)]
+        from: ConvertFrom,
+
+        /// Output format.
+        #[arg(long, default_value = "json", value_enum)]
+        to: ConvertTo,
+
+        /// Input file (e.g. report.nsys-rep).
+        input: PathBuf,
+
+        /// Output file path (defaults to <input_stem>.json).
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -42,6 +70,12 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Analyze { traces, output } => run_analyze(&traces, &output),
         Command::Merge { traces, output } => run_merge(&traces, &output),
+        Command::Convert {
+            from,
+            to,
+            input,
+            output,
+        } => run_convert(from, to, &input, output.as_ref()),
     }
 }
 
@@ -99,6 +133,35 @@ fn run_merge(traces: &[PathBuf], output: &PathBuf) -> Result<()> {
     serde_json::to_writer(writer, &merged)?;
 
     tracing::info!("Wrote merged trace to {}", output.display());
+
+    Ok(())
+}
+
+fn run_convert(
+    _from: ConvertFrom,
+    _to: ConvertTo,
+    input: &Path,
+    output: Option<&PathBuf>,
+) -> Result<()> {
+    anyhow::ensure!(input.exists(), "Input file not found: {}", input.display());
+    anyhow::ensure!(input.is_file(), "Not a file: {}", input.display());
+
+    let output_path = match output {
+        Some(p) => p.clone(),
+        None => input.with_extension("json"),
+    };
+
+    let trace = trace::convert::nsys_to_chrome_trace(input)?;
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let file = std::fs::File::create(&output_path)?;
+    let writer = std::io::BufWriter::new(file);
+    serde_json::to_writer(writer, &trace)?;
+
+    tracing::info!("Wrote Chrome trace JSON to {}", output_path.display());
 
     Ok(())
 }
