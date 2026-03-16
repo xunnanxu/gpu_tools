@@ -1,6 +1,7 @@
 //! Convert nsys-rep files to Chrome trace JSON format.
 
 use anyhow::{Context, Result, bail};
+use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
@@ -83,24 +84,40 @@ pub fn nsys_to_chrome_trace(nsys_path: &Path) -> Result<serde_json::Value> {
     let strings = load_strings(&conn)?;
     let min_ts = find_min_timestamp(&conn)?;
 
-    let mut events: Vec<serde_json::Value> = Vec::new();
+    let total = count_total_rows(&conn);
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{msg} [{bar:40}] {pos}/{len} ({percent}%)")
+            .expect("valid template")
+            .progress_chars("=> "),
+    );
+    pb.set_message("Converting events");
+
+    let mut events: Vec<serde_json::Value> = Vec::with_capacity(total as usize);
 
     log_skip(
-        append_kernel_events(&conn, &strings, min_ts, &mut events),
+        append_kernel_events(&conn, &strings, min_ts, &pb, &mut events),
         "kernel",
     );
     log_skip(
-        append_runtime_events(&conn, &strings, min_ts, &mut events),
+        append_runtime_events(&conn, &strings, min_ts, &pb, &mut events),
         "runtime",
     );
-    log_skip(append_memcpy_events(&conn, min_ts, &mut events), "memcpy");
-    log_skip(append_memset_events(&conn, min_ts, &mut events), "memset");
     log_skip(
-        append_nvtx_events(&conn, &strings, min_ts, &mut events),
+        append_memcpy_events(&conn, min_ts, &pb, &mut events),
+        "memcpy",
+    );
+    log_skip(
+        append_memset_events(&conn, min_ts, &pb, &mut events),
+        "memset",
+    );
+    log_skip(
+        append_nvtx_events(&conn, &strings, min_ts, &pb, &mut events),
         "nvtx",
     );
 
-    tracing::info!("Converted {} events", events.len());
+    pb.finish_with_message(format!("Converted {} events", events.len()));
     Ok(serde_json::json!({ "traceEvents": events }))
 }
 
@@ -142,6 +159,27 @@ fn find_min_timestamp(conn: &Connection) -> Result<i64> {
     Ok(min_ts)
 }
 
+fn count_total_rows(conn: &Connection) -> u64 {
+    let tables = [
+        "CUPTI_ACTIVITY_KIND_KERNEL",
+        "CUPTI_ACTIVITY_KIND_RUNTIME",
+        "CUPTI_ACTIVITY_KIND_MEMCPY",
+        "CUPTI_ACTIVITY_KIND_MEMSET",
+    ];
+    let nvtx = "SELECT COUNT(*) FROM NVTX_EVENTS WHERE end IS NOT NULL";
+    let mut total: u64 = 0;
+    for table in tables {
+        let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
+        if let Ok(n) = conn.query_row(&sql, [], |row| row.get::<_, u64>(0)) {
+            total += n;
+        }
+    }
+    if let Ok(n) = conn.query_row(nvtx, [], |row| row.get::<_, u64>(0)) {
+        total += n;
+    }
+    total
+}
+
 /// Convert nanoseconds to microseconds relative to min_ts.
 fn ns_to_us(ns: i64, base: i64) -> f64 {
     (ns - base) as f64 / 1000.0
@@ -162,6 +200,7 @@ fn append_kernel_events(
     conn: &Connection,
     strings: &HashMap<i64, String>,
     min_ts: i64,
+    pb: &ProgressBar,
     events: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -213,6 +252,7 @@ fn append_kernel_events(
                 "registers_per_thread": regs
             }
         }));
+        pb.inc(1);
     }
 
     Ok(())
@@ -222,6 +262,7 @@ fn append_runtime_events(
     conn: &Connection,
     strings: &HashMap<i64, String>,
     min_ts: i64,
+    pb: &ProgressBar,
     events: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -255,6 +296,7 @@ fn append_runtime_events(
                 "External id": correlation_id
             }
         }));
+        pb.inc(1);
     }
 
     Ok(())
@@ -274,6 +316,7 @@ fn memcpy_kind_name(kind: i64) -> &'static str {
 fn append_memcpy_events(
     conn: &Connection,
     min_ts: i64,
+    pb: &ProgressBar,
     events: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -307,6 +350,7 @@ fn append_memcpy_events(
                 "copy_kind": memcpy_kind_name(copy_kind)
             }
         }));
+        pb.inc(1);
     }
 
     Ok(())
@@ -315,6 +359,7 @@ fn append_memcpy_events(
 fn append_memset_events(
     conn: &Connection,
     min_ts: i64,
+    pb: &ProgressBar,
     events: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -346,6 +391,7 @@ fn append_memset_events(
                 "value": value
             }
         }));
+        pb.inc(1);
     }
 
     Ok(())
@@ -355,6 +401,7 @@ fn append_nvtx_events(
     conn: &Connection,
     strings: &HashMap<i64, String>,
     min_ts: i64,
+    pb: &ProgressBar,
     events: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -384,6 +431,7 @@ fn append_nvtx_events(
             "pid": pid,
             "tid": tid
         }));
+        pb.inc(1);
     }
 
     Ok(())
