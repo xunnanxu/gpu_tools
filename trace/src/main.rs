@@ -1,40 +1,65 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Compare GPU kernel execution times across multiple PyTorch profiler traces.
+/// GPU trace analysis CLI for PyTorch profiler traces.
 #[derive(Parser, Debug)]
 #[command(name = "trace", version, about)]
 struct Cli {
-    /// Trace JSON files in Chrome trace format (repeatable).
-    #[arg(short = 't', long = "trace", required = true)]
-    traces: Vec<PathBuf>,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Output path: a directory (writes comparison.md inside) or a .md file path.
-    #[arg(short = 'o', long = "output", default_value = ".")]
-    output: PathBuf,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Analyze and compare GPU kernel execution times across traces.
+    Analyze {
+        /// Trace JSON files in Chrome trace format (repeatable).
+        #[arg(short = 't', long = "trace", required = true)]
+        traces: Vec<PathBuf>,
+
+        /// Output path: a directory (writes comparison.md inside) or a .md file path.
+        #[arg(short = 'o', long = "output", default_value = ".")]
+        output: PathBuf,
+    },
+
+    /// Merge trace files into one, with CPU processes sorted before GPU.
+    Merge {
+        /// Trace JSON files to merge (repeatable).
+        #[arg(short = 't', long = "trace", required = true)]
+        traces: Vec<PathBuf>,
+
+        /// Output JSON file path.
+        #[arg(short = 'o', long = "output", required = true)]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    trace::util::validate_trace_files(&cli.traces)?;
+    match cli.command {
+        Command::Analyze { traces, output } => run_analyze(&traces, &output),
+        Command::Merge { traces, output } => run_merge(&traces, &output),
+    }
+}
 
-    // If the output path looks like a file (has .md extension), use it directly.
-    // Otherwise treat it as a directory and write comparison.md inside.
-    let output_path = if cli.output.extension().is_some_and(|ext| ext == "md") {
-        if let Some(parent) = cli.output.parent() {
+fn run_analyze(traces: &[PathBuf], output: &PathBuf) -> Result<()> {
+    trace::util::validate_trace_files(traces)?;
+
+    let output_path = if output.extension().is_some_and(|ext| ext == "md") {
+        if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        cli.output.clone()
+        output.clone()
     } else {
-        std::fs::create_dir_all(&cli.output)?;
-        cli.output.join("comparison.md")
+        std::fs::create_dir_all(output)?;
+        output.join("comparison.md")
     };
 
     let mut all_traces = Vec::new();
-    for path in &cli.traces {
+    for path in traces {
         let trace_name = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -56,6 +81,24 @@ fn main() -> Result<()> {
     tracing::info!("Wrote comparison table to {}", output_path.display());
 
     print!("{}", table);
+
+    Ok(())
+}
+
+fn run_merge(traces: &[PathBuf], output: &PathBuf) -> Result<()> {
+    trace::util::validate_trace_files(traces)?;
+
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let merged = trace::merge_traces(traces)?;
+
+    let file = std::fs::File::create(output)?;
+    let writer = std::io::BufWriter::new(file);
+    serde_json::to_writer(writer, &merged)?;
+
+    tracing::info!("Wrote merged trace to {}", output.display());
 
     Ok(())
 }
