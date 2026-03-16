@@ -1,21 +1,84 @@
 //! Convert nsys-rep files to Chrome trace JSON format.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Convert an nsys-rep file to Chrome trace JSON.
+const NSYS_HEADER: &[u8] = b"NVIDIA Tegra Profiler Report";
+const SQLITE_HEADER: &[u8] = b"SQLite format 3";
+
+/// Detect file format and return an open SQLite connection.
 ///
-/// The nsys-rep file is an SQLite database containing CUPTI activity records.
-/// This reads the relevant tables and produces Chrome trace JSON viewable in
-/// chrome://tracing or Perfetto.
+/// - If the file starts with the SQLite magic header, open it directly.
+/// - If it starts with the NVIDIA nsys-rep header, shell out to
+///   `nsys export --type sqlite` to produce a temporary SQLite file.
+fn open_as_sqlite(path: &Path) -> Result<(Connection, Option<tempfile::TempDir>)> {
+    let header = std::fs::read(path)
+        .map(|d| d[..d.len().min(64)].to_vec())
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+
+    if header.starts_with(SQLITE_HEADER) {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("Failed to open SQLite file: {}", path.display()))?;
+        return Ok((conn, None));
+    }
+
+    if header.starts_with(NSYS_HEADER) {
+        let tmp_dir = tempfile::tempdir().context("Failed to create temp dir")?;
+        let sqlite_path = tmp_dir.path().join("export.sqlite");
+
+        let output = std::process::Command::new("nsys")
+            .args(["export", "--type", "sqlite", "--output"])
+            .arg(&sqlite_path)
+            .arg(path)
+            .output()
+            .context(
+                "Failed to run `nsys export`. \
+                 Is nsys installed and in PATH? \
+                 Alternatively, run `nsys export --type sqlite -o report.sqlite report.nsys-rep` \
+                 on the machine where nsys is installed, then convert the .sqlite file.",
+            )?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("nsys export failed: {stderr}");
+        }
+
+        let conn = Connection::open_with_flags(
+            &sqlite_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to open nsys-exported SQLite: {}",
+                sqlite_path.display()
+            )
+        })?;
+        // Keep tmp_dir alive so the file isn't deleted while conn is open.
+        return Ok((conn, Some(tmp_dir)));
+    }
+
+    bail!(
+        "Unrecognized file format for {}. Expected an nsys-rep file \
+         (NVIDIA Tegra Profiler Report) or a pre-exported SQLite file.",
+        path.display()
+    );
+}
+
+/// Convert an nsys-rep file (or pre-exported SQLite) to Chrome trace JSON.
+///
+/// Supports two input formats:
+/// - Native nsys-rep files: requires `nsys` in PATH to export to SQLite first.
+/// - Pre-exported SQLite files: read directly (use `nsys export --type sqlite`
+///   on the profiling machine if `nsys` is not available locally).
+///
+/// Produces Chrome trace JSON viewable in chrome://tracing or Perfetto.
 pub fn nsys_to_chrome_trace(nsys_path: &Path) -> Result<serde_json::Value> {
-    let conn = Connection::open_with_flags(
-        nsys_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("Failed to open nsys-rep file: {}", nsys_path.display()))?;
+    let (conn, _tmp_dir) = open_as_sqlite(nsys_path)?;
 
     let strings = load_strings(&conn)?;
     let min_ts = find_min_timestamp(&conn)?;
