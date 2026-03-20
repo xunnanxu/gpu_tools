@@ -1,11 +1,32 @@
 //! Merge multiple Chrome trace JSON files into one.
 
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
-use crate::util;
+/// Open a file as a streaming reader, transparently decompressing gzip if needed.
+///
+/// Peeks at the first two bytes to detect the gzip magic (`0x1f 0x8b`) without
+/// loading the whole file; chains those bytes back so no data is lost.
+fn open_reader(path: &Path) -> Result<Box<dyn Read>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut buf = std::io::BufReader::new(file);
+
+    let mut magic = [0u8; 2];
+    let n = buf.read(&mut magic)?;
+    // Reconstruct the full stream by prepending the bytes we already consumed.
+    let full = std::io::Cursor::new(magic[..n].to_vec()).chain(buf);
+
+    if n == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+        Ok(Box::new(std::io::BufReader::new(GzDecoder::new(full))))
+    } else {
+        Ok(Box::new(full))
+    }
+}
 
 /// Merge multiple trace files into a single Chrome trace JSON.
 ///
@@ -18,7 +39,7 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
     let pb = ProgressBar::new(paths.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{msg} [{bar:40}] {pos}/{len} ({percent}%)")
+            .template("{msg} {pos}/{len} ({percent}%) [{elapsed}<{eta}] {wide_bar}")
             .expect("valid template")
             .progress_chars("=> "),
     );
@@ -30,13 +51,16 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
     let pid_offset_step: i64 = 1_000_000;
 
     for (file_idx, path) in paths.iter().enumerate() {
-        let content = util::read_maybe_gzipped(path)?;
-        let raw: serde_json::Value = serde_json::from_str(&content)
+        // Stream-parse: no need to hold the full file text and parsed tree simultaneously.
+        let reader = open_reader(path)?;
+        let mut raw: serde_json::Value = serde_json::from_reader(reader)
             .with_context(|| format!("Failed to parse JSON from {}", path.display()))?;
-        let events = raw
-            .get("traceEvents")
-            .and_then(|v| v.as_array())
-            .with_context(|| format!("Missing traceEvents in {}", path.display()))?;
+
+        // Move the events array out of `raw` to avoid cloning each element.
+        let events = match raw["traceEvents"].take() {
+            serde_json::Value::Array(arr) => arr,
+            _ => anyhow::bail!("Missing or invalid traceEvents in {}", path.display()),
+        };
 
         let offset = if paths.len() > 1 {
             file_idx as i64 * pid_offset_step
@@ -44,9 +68,7 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
             0
         };
 
-        for event in events {
-            let mut event = event.clone();
-
+        for mut event in events {
             // Offset pid for multi-file merges to avoid collisions.
             if offset != 0
                 && let Some(pid) = event.get("pid").and_then(|v| v.as_i64())

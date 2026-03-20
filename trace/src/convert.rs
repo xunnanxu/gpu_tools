@@ -88,7 +88,7 @@ pub fn nsys_to_chrome_trace(nsys_path: &Path) -> Result<serde_json::Value> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{msg} [{bar:40}] {pos}/{len} ({percent}%)")
+            .template("{msg} {pos}/{len} ({percent}%) [{elapsed}<{eta}] {wide_bar}")
             .expect("valid template")
             .progress_chars("=> "),
     );
