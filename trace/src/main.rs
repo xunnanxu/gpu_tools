@@ -126,7 +126,7 @@ fn run_merge(traces: &[PathBuf], output: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let merged = trace::merge_traces(traces)?;
+    let merged = trace::merge::merge_traces(traces)?;
 
     let file = std::fs::File::create(output)?;
     let writer = std::io::BufWriter::new(file);
