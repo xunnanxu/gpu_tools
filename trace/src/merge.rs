@@ -1,8 +1,9 @@
 //! Merge multiple Chrome trace JSON files into one.
 
 use anyhow::{Context, Result};
+use tracing::info;
 use flate2::read::GzDecoder;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -35,8 +36,8 @@ fn open_reader(path: &Path) -> Result<Box<dyn Read>> {
 /// `cpu_op`/`cuda_runtime`; GPU processes have `kernel`/`gpu_memcpy`.
 ///
 /// When merging multiple files, pids are offset to avoid collisions.
-pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
-    let pb = ProgressBar::new(paths.len() as u64);
+pub fn merge_traces(paths: &[PathBuf], mp: &MultiProgress) -> Result<serde_json::Value> {
+    let pb = mp.add(ProgressBar::new(paths.len() as u64));
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg} {pos}/{len} ({percent}%) [{elapsed}<{eta}] {wide_bar}")
@@ -49,8 +50,11 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
     // Track which categories each pid uses, to classify CPU vs GPU.
     let mut cats_by_pid: HashMap<i64, HashSet<String>> = HashMap::new();
     let pid_offset_step: i64 = 1_000_000;
+    let mut processed: u64 = 0;
+    let mut loaded_total: u64 = 0;
 
     for (file_idx, path) in paths.iter().enumerate() {
+        info!("Loading {}", path.display());
         // Stream-parse: no need to hold the full file text and parsed tree simultaneously.
         let reader = open_reader(path)?;
         let mut raw: serde_json::Value = serde_json::from_reader(reader)
@@ -61,6 +65,9 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
             serde_json::Value::Array(arr) => arr,
             _ => anyhow::bail!("Missing or invalid traceEvents in {}", path.display()),
         };
+
+        loaded_total += events.len() as u64;
+        info!("Loaded {} ({} events)", path.display(), events.len());
 
         let offset = if paths.len() > 1 {
             file_idx as i64 * pid_offset_step
@@ -92,6 +99,10 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
             }
 
             all_events.push(event);
+            processed += 1;
+            if processed.is_multiple_of(10_000) {
+                pb.set_message(format!("Merging traces ({processed} / {loaded_total})"));
+            }
         }
 
         pb.inc(1);
@@ -128,7 +139,7 @@ pub fn merge_traces(paths: &[PathBuf]) -> Result<serde_json::Value> {
         }));
     }
 
-    pb.finish_with_message(format!("Merged {} files", paths.len()));
+    pb.finish_with_message(format!("Merged {} files ({processed} events)", paths.len()));
     Ok(serde_json::json!({ "traceEvents": all_events }))
 }
 
@@ -148,7 +159,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("trace_test_merge_single.json");
         std::fs::write(&tmp, serde_json::to_string(&trace_json).unwrap()).unwrap();
 
-        let result = merge_traces(&[tmp.clone()]).unwrap();
+        let result = merge_traces(&[tmp.clone()], &MultiProgress::new()).unwrap();
         let events = result["traceEvents"].as_array().unwrap();
 
         // Original 2 events + 2 sort_index metadata events
@@ -196,7 +207,7 @@ mod tests {
         std::fs::write(&tmp1, serde_json::to_string(&trace1).unwrap()).unwrap();
         std::fs::write(&tmp2, serde_json::to_string(&trace2).unwrap()).unwrap();
 
-        let result = merge_traces(&[tmp1.clone(), tmp2.clone()]).unwrap();
+        let result = merge_traces(&[tmp1.clone(), tmp2.clone()], &MultiProgress::new()).unwrap();
         let events = result["traceEvents"].as_array().unwrap();
 
         // File 1 pid stays 100, file 2 pid becomes 100 + 1_000_000

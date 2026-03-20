@@ -1,6 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use indicatif::MultiProgress;
 use std::path::{Path, PathBuf};
+use tracing_indicatif::IndicatifWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// GPU trace analysis CLI for PyTorch profiler traces.
 #[derive(Parser, Debug)]
@@ -64,12 +68,17 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let mp = MultiProgress::new();
+    let indicatif_writer: IndicatifWriter = IndicatifWriter::new(mp.clone());
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(indicatif_writer))
+        .init();
+
     let cli = Cli::parse();
 
     match cli.command {
         Command::Analyze { traces, output } => run_analyze(&traces, &output),
-        Command::Merge { traces, output } => run_merge(&traces, &output),
+        Command::Merge { traces, output } => run_merge(&traces, &output, &mp),
         Command::Convert {
             from,
             to,
@@ -119,14 +128,14 @@ fn run_analyze(traces: &[PathBuf], output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_merge(traces: &[PathBuf], output: &PathBuf) -> Result<()> {
+fn run_merge(traces: &[PathBuf], output: &PathBuf, mp: &MultiProgress) -> Result<()> {
     trace::util::validate_trace_files(traces)?;
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let merged = trace::merge::merge_traces(traces)?;
+    let merged = trace::merge::merge_traces(traces, mp)?;
 
     let file = std::fs::File::create(output)?;
     let writer = std::io::BufWriter::new(file);
