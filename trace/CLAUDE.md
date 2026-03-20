@@ -29,6 +29,7 @@
 - Usage: `trace merge -t trace1.json -t trace2.json -o output.json`
 - Merges multiple trace files into one.
 - CPU processes (e.g. `python3 988976`) sorted before GPU processes (e.g. `python3.0` with `stream X`) using `process_sort_index`.
+- **Timestamp alignment:** all files are shifted so the globally earliest `ts` across all files becomes the common origin. Each file's shift = `global_min_ts - file_min_ts`. This eliminates the blank gap between traces in the viewer when files were recorded at different wall-clock offsets.
 
 ## Coding Standards
 - Strictly enforce `cargo fmt` for formatting.

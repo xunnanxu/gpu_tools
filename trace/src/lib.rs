@@ -7,7 +7,6 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-
 /// A single event from the Chrome trace format.
 #[derive(Debug, Deserialize)]
 pub struct TraceEvent {
@@ -503,5 +502,4 @@ mod tests {
         assert!((percentile50(&[1.0, 2.0, 3.0, 4.0]) - 2.5).abs() < 0.001);
         assert!((percentile50(&[5.0]) - 5.0).abs() < 0.001);
     }
-
 }
