@@ -41,7 +41,6 @@
 ## Workflow Directive
 - **CRITICAL:** At the start of every session, or when asking for the "next task", you MUST read `TODO.md` to understand the current project state.
 - Update `TODO.md` automatically by checking off tasks (`[x]`) when they are fully tested and complete.
-- Whenever a task is completed, make a git commit but do not push the changes yet.
 
 ## Trace Parsing Details
 
