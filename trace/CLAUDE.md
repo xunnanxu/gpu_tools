@@ -4,6 +4,7 @@
 - `src/main.rs`: Handles the `clap` CLI entry point and argument parsing.
 - `src/lib.rs`: Handles main logic like chrome trace JSON parsing, trace analysis.
 - `src/util.rs`: Contains reusable utils like optional gzipped content handling, input validation.
+- `src/remote.rs`: SSH/SCP remote operations for downloading and listing trace files.
 
 ## System Architecture & Tech Stack
 - **Language:** Rust (Stable)
@@ -30,6 +31,24 @@
 - Merges multiple trace files into one.
 - CPU processes (e.g. `python3 988976`) sorted before GPU processes (e.g. `python3.0` with `stream X`) using `process_sort_index`.
 - **Timestamp alignment:** all files are shifted so the globally earliest `ts` across all files becomes the common origin. Each file's shift = `global_min_ts - file_min_ts`. This eliminates the blank gap between traces in the viewer when files were recorded at different wall-clock offsets.
+
+### `download`
+- Usage: `trace download -t ssh://host:/path/to/trace.json -o local/path`
+- Usage: `trace download -r ssh://host:/path/to/dir -o local/dir`
+- Downloads trace files from a remote host via SSH (`ssh://host:/path` format, honors `~/.ssh/config`).
+- `-t` for single file, `-r` for recursive directory (mutually exclusive, one required).
+- Single file supports renaming (`-t ssh://host:/a.json -o b.json`) or keeping name (`-t ssh://host:/a.json -o dir/`).
+- Recursive mode only downloads `*.json` and `*.json.gz` files, preserving directory structure. Output must be a directory.
+- **Gzip optimization (default on):** if a raw JSON file is > 1GB, gzips it on the remote host first (`gzip -kf`) then downloads the `.json.gz`. Disable with `--no-gzip`.
+- Logs each SSH/SCP operation via `info!`.
+
+### `list`
+- Usage: `trace list -t ssh://host:/path/to/trace.json`
+- Usage: `trace list -r ssh://host:/path/to/dir`
+- Lists trace files on a remote host via SSH, showing path, human-readable size, and modification date.
+- `-t` for single file info, `-r` for recursive directory listing (mutually exclusive, one required).
+- Recursive mode only lists `*.json` and `*.json.gz` files.
+- Logs each SSH operation via `info!`.
 
 ## Coding Standards
 - Strictly enforce `cargo fmt` for formatting.

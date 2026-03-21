@@ -1,5 +1,6 @@
 pub mod convert;
 pub mod merge;
+pub mod remote;
 pub mod util;
 
 use anyhow::{Context, Result};

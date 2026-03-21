@@ -48,6 +48,40 @@ enum Command {
         output: PathBuf,
     },
 
+    /// Download trace files from a remote host via SSH.
+    #[command(group(clap::ArgGroup::new("source").required(true).multiple(false).args(["trace", "remote_dir"])))]
+    Download {
+        /// Single remote trace file: ssh://host:/path/to/trace.json
+        #[arg(short = 't', long = "trace")]
+        trace: Option<String>,
+
+        /// Remote directory to download recursively (*.json, *.json.gz only):
+        /// ssh://host:/path/to/dir
+        #[arg(short = 'r', long = "remote-dir")]
+        remote_dir: Option<String>,
+
+        /// Output path (file or directory).
+        #[arg(short = 'o', long = "output", required = true)]
+        output: PathBuf,
+
+        /// Disable gzip optimization for large files.
+        #[arg(long = "no-gzip", default_value_t = false)]
+        no_gzip: bool,
+    },
+
+    /// List trace files on a remote host via SSH.
+    #[command(group(clap::ArgGroup::new("source").required(true).multiple(false).args(["trace", "remote_dir"])))]
+    List {
+        /// Single remote trace file: ssh://host:/path/to/trace.json
+        #[arg(short = 't', long = "trace")]
+        trace: Option<String>,
+
+        /// Remote directory to list recursively (*.json, *.json.gz only):
+        /// ssh://host:/path/to/dir
+        #[arg(short = 'r', long = "remote-dir")]
+        remote_dir: Option<String>,
+    },
+
     /// Convert trace files between formats.
     Convert {
         /// Input format.
@@ -79,6 +113,13 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Analyze { traces, output } => run_analyze(&traces, &output),
         Command::Merge { traces, output } => run_merge(&traces, &output, &mp),
+        Command::Download {
+            trace,
+            remote_dir,
+            output,
+            no_gzip,
+        } => run_download(trace.as_deref(), remote_dir.as_deref(), &output, no_gzip),
+        Command::List { trace, remote_dir } => run_list(trace.as_deref(), remote_dir.as_deref()),
         Command::Convert {
             from,
             to,
@@ -173,4 +214,17 @@ fn run_convert(
     tracing::info!("Wrote Chrome trace JSON to {}", output_path.display());
 
     Ok(())
+}
+
+fn run_download(
+    trace: Option<&str>,
+    remote_dir: Option<&str>,
+    output: &Path,
+    no_gzip: bool,
+) -> Result<()> {
+    trace::remote::run_download(trace, remote_dir, output, no_gzip)
+}
+
+fn run_list(trace: Option<&str>, remote_dir: Option<&str>) -> Result<()> {
+    trace::remote::run_list(trace, remote_dir)
 }
