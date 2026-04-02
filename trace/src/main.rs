@@ -70,16 +70,12 @@ enum Command {
     },
 
     /// List trace files on a remote host via SSH.
-    #[command(group(clap::ArgGroup::new("source").required(true).multiple(false).args(["trace", "remote_dir"])))]
+    ///
+    /// Auto-detects whether the path is a file or directory.
+    /// Directories are listed recursively (*.json, *.json.gz only).
     List {
-        /// Single remote trace file: ssh://host:/path/to/trace.json
-        #[arg(short = 't', long = "trace")]
-        trace: Option<String>,
-
-        /// Remote directory to list recursively (*.json, *.json.gz only):
-        /// ssh://host:/path/to/dir
-        #[arg(short = 'r', long = "remote-dir")]
-        remote_dir: Option<String>,
+        /// Remote path: ssh://host:/path/to/file_or_dir
+        path: String,
     },
 
     /// Convert trace files between formats.
@@ -119,7 +115,7 @@ fn main() -> Result<()> {
             output,
             no_gzip,
         } => run_download(trace.as_deref(), remote_dir.as_deref(), &output, no_gzip),
-        Command::List { trace, remote_dir } => run_list(trace.as_deref(), remote_dir.as_deref()),
+        Command::List { path } => run_list(&path),
         Command::Convert {
             from,
             to,
@@ -225,6 +221,6 @@ fn run_download(
     trace::remote::run_download(trace, remote_dir, output, no_gzip)
 }
 
-fn run_list(trace: Option<&str>, remote_dir: Option<&str>) -> Result<()> {
-    trace::remote::run_list(trace, remote_dir)
+fn run_list(path: &str) -> Result<()> {
+    trace::remote::run_list(path)
 }

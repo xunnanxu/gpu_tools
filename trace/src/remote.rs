@@ -141,14 +141,9 @@ fn format_size(bytes: u64) -> String {
 }
 
 /// Execute the `list` command.
-pub fn run_list(trace: Option<&str>, remote_dir: Option<&str>) -> Result<()> {
-    let url = SshUrl::parse(trace.or(remote_dir).unwrap())?;
-
-    let files = if trace.is_some() {
-        vec![stat_remote_file(&url.host, &url.remote_path)?]
-    } else {
-        list_remote_dir(&url.host, &url.remote_path)?
-    };
+pub fn run_list(path: &str) -> Result<()> {
+    let url = SshUrl::parse(path)?;
+    let files = list_remote_dir(&url.host, &url.remote_path)?;
 
     if files.is_empty() {
         info!("No trace files found.");
