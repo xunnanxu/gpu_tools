@@ -404,20 +404,42 @@ fn append_nvtx_events(
     pb: &ProgressBar,
     events: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
+    // `text` holds raw NVTX strings; `textId` references StringIds for registered
+    // strings. Older nsys schemas only had `text`, so fall back gracefully.
+    let has_text_id = conn
+        .prepare("SELECT textId FROM NVTX_EVENTS LIMIT 0")
+        .is_ok();
+    let sql = if has_text_id {
+        "SELECT start, end, text, globalTid, textId \
+         FROM NVTX_EVENTS WHERE end IS NOT NULL"
+    } else {
         "SELECT start, end, text, globalTid \
-         FROM NVTX_EVENTS WHERE end IS NOT NULL",
-    )?;
+         FROM NVTX_EVENTS WHERE end IS NOT NULL"
+    };
+    let mut stmt = conn.prepare(sql)?;
 
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let start: i64 = row.get(0)?;
         let end: i64 = row.get(1)?;
-        let text_id: Option<i64> = row.get(2)?;
         let global_tid: i64 = row.get(3)?;
 
-        let name = text_id
-            .and_then(|id| strings.get(&id).cloned())
+        let text_val: Option<String> = match row.get_ref(2)? {
+            rusqlite::types::ValueRef::Text(bytes) => {
+                Some(std::str::from_utf8(bytes).unwrap_or("").to_string())
+            }
+            rusqlite::types::ValueRef::Integer(id) => strings.get(&id).cloned(),
+            _ => None,
+        };
+        let text_id_val: Option<String> = if has_text_id {
+            row.get::<_, Option<i64>>(4)?
+                .and_then(|id| strings.get(&id).cloned())
+        } else {
+            None
+        };
+        let name = text_val
+            .filter(|s| !s.is_empty())
+            .or(text_id_val)
             .unwrap_or_else(|| "nvtx".to_string());
         let pid = ((global_tid >> 32) & 0xFFFF_FFFF) as i32;
         let tid = (global_tid & 0xFFFF_FFFF) as i32;

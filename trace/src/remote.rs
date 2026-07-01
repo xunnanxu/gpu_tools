@@ -180,101 +180,143 @@ pub fn resolve_single_output(remote_path: &str, output: &Path) -> PathBuf {
     }
 }
 
-const GZIP_THRESHOLD: u64 = 1_073_741_824; // 1 GB
+pub const DEFAULT_COMPRESS_THRESHOLD: u64 = 524_288_000; // 500 MB
+
+/// A classified remote path.
+enum RemoteKind {
+    File(RemoteFileInfo),
+    Dir(Vec<RemoteFileInfo>),
+}
+
+/// Classify a remote path as a file or directory.
+///
+/// Uses `find -maxdepth 0 -printf '%y'` to determine the type in one ssh call,
+/// then follows up with a listing call for directories.
+fn classify_remote(host: &str, path: &str) -> Result<RemoteKind> {
+    let cmd = format!(r"find -L '{path}' -maxdepth 0 -printf '%y\n'");
+    let out = ssh_exec(host, &cmd)?;
+    match out.trim() {
+        "d" => Ok(RemoteKind::Dir(list_remote_dir(host, path)?)),
+        "f" => Ok(RemoteKind::File(stat_remote_file(host, path)?)),
+        other => anyhow::bail!(
+            "Remote path {path} on {host} is not a regular file or directory (got type: {other:?})"
+        ),
+    }
+}
 
 /// Execute the `download` command.
+///
+/// Each source is auto-classified as a file or directory. If any source is a
+/// directory or more than one source is given, output must be a directory.
 pub fn run_download(
-    trace: Option<&str>,
-    remote_dir: Option<&str>,
+    sources: &[String],
     output: &Path,
-    no_gzip: bool,
+    no_compress: bool,
+    compress_threshold: u64,
 ) -> Result<()> {
-    let url = SshUrl::parse(trace.or(remote_dir).unwrap())?;
+    anyhow::ensure!(!sources.is_empty(), "At least one source is required");
 
-    if trace.is_some() {
-        download_single(&url, output, no_gzip)
-    } else {
-        download_recursive(&url, output, no_gzip)
-    }
-}
-
-fn download_single(url: &SshUrl, output: &Path, no_gzip: bool) -> Result<()> {
-    let local_path = resolve_single_output(&url.remote_path, output);
-
-    if let Some(parent) = local_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    // Parse and classify all sources first, so we fail fast on any missing path.
+    let mut classified = Vec::with_capacity(sources.len());
+    for s in sources {
+        let url = SshUrl::parse(s)?;
+        let kind = classify_remote(&url.host, &url.remote_path)?;
+        classified.push((url, kind));
     }
 
-    let (scp_remote_path, final_local_path) = if !no_gzip && !url.remote_path.ends_with(".gz") {
-        let info = stat_remote_file(&url.host, &url.remote_path)?;
-        if info.size_bytes > GZIP_THRESHOLD {
-            info!(
-                "File is {}, compressing on remote first",
-                format_size(info.size_bytes)
-            );
-            ssh_exec(&url.host, &format!("gzip -kf '{}'", url.remote_path))?;
-            let gz_remote = format!("{}.gz", url.remote_path);
-            let gz_local = ensure_gz_extension(&local_path);
-            (gz_remote, gz_local)
-        } else {
-            (url.remote_path.clone(), local_path)
-        }
-    } else {
-        (url.remote_path.clone(), local_path)
-    };
+    let has_dir = classified
+        .iter()
+        .any(|(_, k)| matches!(k, RemoteKind::Dir(_)));
+    let multiple = classified.len() > 1;
 
-    let scp_source = format!("{}:{}", url.host, scp_remote_path);
-    scp_download(&scp_source, &final_local_path)?;
-    info!("Downloaded to {}", final_local_path.display());
-    Ok(())
-}
-
-fn download_recursive(url: &SshUrl, output: &Path, no_gzip: bool) -> Result<()> {
-    std::fs::create_dir_all(output)?;
-
-    let files = list_remote_dir(&url.host, &url.remote_path)?;
-
-    if files.is_empty() {
-        info!("No trace files found in remote directory.");
+    // Single file source: honor rename semantics via resolve_single_output.
+    if !has_dir && !multiple {
+        let (url, kind) = &classified[0];
+        let RemoteKind::File(info) = kind else {
+            unreachable!()
+        };
+        let local_path = resolve_single_output(&url.remote_path, output);
+        download_one_file(&url.host, info, &local_path, no_compress, compress_threshold)?;
+        info!("Downloaded to {}", local_path.display());
         return Ok(());
     }
 
-    info!("Found {} trace file(s) to download", files.len());
+    // Otherwise: output must be a directory.
+    std::fs::create_dir_all(output)?;
 
-    for file_info in &files {
-        let relative = file_info
-            .path
-            .strip_prefix(&url.remote_path)
-            .unwrap_or(&file_info.path)
-            .trim_start_matches('/');
-        let local_path = output.join(relative);
-
-        if let Some(parent) = local_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    let mut total = 0usize;
+    for (url, kind) in &classified {
+        match kind {
+            RemoteKind::File(info) => {
+                let filename = Path::new(&info.path).file_name().ok_or_else(|| {
+                    anyhow::anyhow!("Invalid remote file path: {}", info.path)
+                })?;
+                let local_path = output.join(filename);
+                download_one_file(&url.host, info, &local_path, no_compress, compress_threshold)?;
+                total += 1;
+            }
+            RemoteKind::Dir(files) => {
+                if files.is_empty() {
+                    info!("No trace files found in {}", url.remote_path);
+                    continue;
+                }
+                info!("Found {} trace file(s) in {}", files.len(), url.remote_path);
+                for file_info in files {
+                    let relative = file_info
+                        .path
+                        .strip_prefix(&url.remote_path)
+                        .unwrap_or(&file_info.path)
+                        .trim_start_matches('/');
+                    let local_path = output.join(relative);
+                    download_one_file(
+                        &url.host,
+                        file_info,
+                        &local_path,
+                        no_compress,
+                        compress_threshold,
+                    )?;
+                    total += 1;
+                }
+            }
         }
-
-        let (scp_remote, final_local) = if !no_gzip
-            && !file_info.path.ends_with(".gz")
-            && file_info.size_bytes > GZIP_THRESHOLD
-        {
-            info!(
-                "File {} is {}, compressing on remote first",
-                file_info.path,
-                format_size(file_info.size_bytes)
-            );
-            ssh_exec(&url.host, &format!("gzip -kf '{}'", file_info.path))?;
-            let gz_remote = format!("{}.gz", file_info.path);
-            let gz_local = ensure_gz_extension(&local_path);
-            (gz_remote, gz_local)
-        } else {
-            (file_info.path.clone(), local_path)
-        };
-
-        let scp_source = format!("{}:{}", url.host, scp_remote);
-        scp_download(&scp_source, &final_local)?;
     }
 
-    info!("Downloaded {} file(s) to {}", files.len(), output.display());
+    info!("Downloaded {} file(s) to {}", total, output.display());
+    Ok(())
+}
+
+/// Download a single remote file to `local_dest`, compressing on the remote
+/// first if it exceeds the threshold.
+fn download_one_file(
+    host: &str,
+    info: &RemoteFileInfo,
+    local_dest: &Path,
+    no_compress: bool,
+    compress_threshold: u64,
+) -> Result<()> {
+    let (scp_remote, final_local) = if !no_compress
+        && !info.path.ends_with(".gz")
+        && info.size_bytes > compress_threshold
+    {
+        info!(
+            "File {} is {}, compressing on remote first",
+            info.path,
+            format_size(info.size_bytes)
+        );
+        ssh_exec(host, &format!("gzip -kf '{}'", info.path))?;
+        let gz_remote = format!("{}.gz", info.path);
+        let gz_local = ensure_gz_extension(local_dest);
+        (gz_remote, gz_local)
+    } else {
+        (info.path.clone(), local_dest.to_path_buf())
+    };
+
+    if let Some(parent) = final_local.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let scp_source = format!("{host}:{scp_remote}");
+    scp_download(&scp_source, &final_local)?;
     Ok(())
 }
 

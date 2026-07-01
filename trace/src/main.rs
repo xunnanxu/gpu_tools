@@ -48,25 +48,26 @@ enum Command {
         output: PathBuf,
     },
 
-    /// Download trace files from a remote host via SSH.
-    #[command(group(clap::ArgGroup::new("source").required(true).multiple(false).args(["trace", "remote_dir"])))]
+    /// Download trace files or directories from a remote host via SSH.
+    ///
+    /// Each source is auto-detected as a file or directory. Directories are
+    /// downloaded recursively (*.json, *.json.gz only).
     Download {
-        /// Single remote trace file: ssh://host:/path/to/trace.json
-        #[arg(short = 't', long = "trace")]
-        trace: Option<String>,
-
-        /// Remote directory to download recursively (*.json, *.json.gz only):
-        /// ssh://host:/path/to/dir
-        #[arg(short = 'r', long = "remote-dir")]
-        remote_dir: Option<String>,
+        /// Remote source paths: ssh://host:/path/to/file_or_dir (one or more).
+        #[arg(required = true)]
+        sources: Vec<String>,
 
         /// Output path (file or directory).
         #[arg(short = 'o', long = "output", required = true)]
         output: PathBuf,
 
-        /// Disable gzip optimization for large files.
-        #[arg(long = "no-gzip", default_value_t = false)]
-        no_gzip: bool,
+        /// Disable compression optimization for large files.
+        #[arg(long = "no-compress", default_value_t = false)]
+        no_compress: bool,
+
+        /// Size threshold in MB above which files are compressed on the remote before download.
+        #[arg(long = "compress-threshold", default_value_t = trace::remote::DEFAULT_COMPRESS_THRESHOLD / 1_000_000)]
+        compress_threshold_mb: u64,
     },
 
     /// List trace files on a remote host via SSH.
@@ -110,11 +111,16 @@ fn main() -> Result<()> {
         Command::Analyze { traces, output } => run_analyze(&traces, &output),
         Command::Merge { traces, output } => run_merge(&traces, &output, &mp),
         Command::Download {
-            trace,
-            remote_dir,
+            sources,
             output,
-            no_gzip,
-        } => run_download(trace.as_deref(), remote_dir.as_deref(), &output, no_gzip),
+            no_compress,
+            compress_threshold_mb,
+        } => run_download(
+            &sources,
+            &output,
+            no_compress,
+            compress_threshold_mb * 1_000_000,
+        ),
         Command::List { path } => run_list(&path),
         Command::Convert {
             from,
@@ -213,12 +219,12 @@ fn run_convert(
 }
 
 fn run_download(
-    trace: Option<&str>,
-    remote_dir: Option<&str>,
+    sources: &[String],
     output: &Path,
-    no_gzip: bool,
+    no_compress: bool,
+    compress_threshold: u64,
 ) -> Result<()> {
-    trace::remote::run_download(trace, remote_dir, output, no_gzip)
+    trace::remote::run_download(sources, output, no_compress, compress_threshold)
 }
 
 fn run_list(path: &str) -> Result<()> {

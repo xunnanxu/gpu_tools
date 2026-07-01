@@ -33,13 +33,12 @@
 - **Timestamp alignment:** all files are shifted so the globally earliest `ts` across all files becomes the common origin. Each file's shift = `global_min_ts - file_min_ts`. This eliminates the blank gap between traces in the viewer when files were recorded at different wall-clock offsets.
 
 ### `download`
-- Usage: `trace download -t ssh://host:/path/to/trace.json -o local/path`
-- Usage: `trace download -r ssh://host:/path/to/dir -o local/dir`
-- Downloads trace files from a remote host via SSH (`ssh://host:/path` format, honors `~/.ssh/config`).
-- `-t` for single file, `-r` for recursive directory (mutually exclusive, one required).
-- Single file supports renaming (`-t ssh://host:/a.json -o b.json`) or keeping name (`-t ssh://host:/a.json -o dir/`).
-- Recursive mode only downloads `*.json` and `*.json.gz` files, preserving directory structure. Output must be a directory.
-- **Gzip optimization (default on):** if a raw JSON file is > 1GB, gzips it on the remote host first (`gzip -kf`) then downloads the `.json.gz`. Disable with `--no-gzip`.
+- Usage: `trace download ssh://host:/path/to/trace.json [more_sources...] -o local/path`
+- Downloads trace files or directories from a remote host via SSH (`ssh://host:/path` format, honors `~/.ssh/config`).
+- Accepts one or more positional source URLs. Each source is auto-classified as a file or directory on the remote (single `find -maxdepth 0 -printf '%y'` call per source, run up-front before any download begins).
+- **Single file source:** output supports renaming (`ssh://host:/a.json -o b.json`) or keeping name (`ssh://host:/a.json -o dir/`).
+- **Directory source or multiple sources:** output must be a directory. Directories are walked recursively, downloading only `*.json` and `*.json.gz` files and preserving relative structure below the source dir.
+- **Gzip optimization (default on):** if a raw JSON file exceeds the threshold (default 500MB), gzips it on the remote host first (`gzip -kf`) then downloads the `.json.gz`. Disable with `--no-compress`. Threshold configurable via `--compress-threshold <MB>`.
 - Logs each SSH/SCP operation via `info!`.
 
 ### `list`
